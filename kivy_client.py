@@ -99,12 +99,78 @@ if KIVY:
 else:
     KIVYMD = False
 
-import RNS
-from RNS.vendor import umsgpack as msgpack
-import invite
-import dms
-import ui_geom
-from micron import (micron_parse, micron_page_bg, micron_media_target,
+# ---------------------------------------------------------------------------
+# TEMP boot diagnostics (v0.3): on-screen heartbeat overlay.
+# Prints lifecycle milestones in a plain-Kivy label so a launch failure is
+# visible in a screenshot with no adb. The overlay auto-hides 90s after the
+# window appears. Remove BOOT_DEBUG once the launch diagnosis is done.
+# ---------------------------------------------------------------------------
+BOOT_DEBUG = True
+
+_boot_lines = []
+_boot_label = {"ref": None}
+
+
+def _boot_mark(msg):
+    """Record a boot milestone; drawn onto the overlay once it exists."""
+    if not BOOT_DEBUG:
+        return
+    _boot_lines.append(msg)
+    _boot_refresh()
+
+
+def _boot_refresh():
+    lbl = _boot_label["ref"]
+    if lbl is not None:
+        lbl.text = "\n".join(_boot_lines)
+
+
+def _boot_install(screen):
+    """Attach the heartbeat INSIDE the screen's root layout (kept as a child
+    of the root box so the screen's structural contract -- status label as a
+    direct child of children[0], etc. -- stays intact); auto-hides."""
+    from kivy.clock import Clock
+
+    lbl = Label(
+        text="\n".join(_boot_lines), color=(1, 0.85, 0.4, 1),
+        font_size="10sp", halign="left", valign="top", markup=False,
+        size_hint=(None, None), pos_hint={"x": 0.01, "top": 0.995},
+    )
+    lbl.bind(texture_size=lambda *a: setattr(
+        lbl, "size", (min(lbl.texture_size[0], 420), lbl.texture_size[1])))
+    host = screen.children[0] if screen.children else screen
+    host.add_widget(lbl)  # inside the root layout, top-left via pos_hint
+    _boot_label["ref"] = lbl
+    lbl.text = "\n".join(_boot_lines)
+
+    Clock.schedule_once(lambda dt: _boot_hide(), 90)
+
+
+def _boot_reattach(screen):
+    """Move the heartbeat onto the newly-current screen (e.g. main)."""
+    lbl = _boot_label["ref"]
+    if lbl is None:
+        return
+    if lbl.parent is not None:
+        lbl.parent.remove_widget(lbl)
+    host = screen.children[0] if screen.children else screen
+    host.add_widget(lbl)
+    lbl.text = "\n".join(_boot_lines)
+
+
+def _boot_hide():
+    lbl = _boot_label["ref"]
+    if lbl is not None and lbl.parent is not None:
+        lbl.parent.remove_widget(lbl)
+    _boot_label["ref"] = None
+
+
+import RNS  # noqa: E402  (after the guarded kivy/diagnostics block, by design)
+from RNS.vendor import umsgpack as msgpack  # noqa: E402
+import invite  # noqa: E402
+import dms  # noqa: E402
+import ui_geom  # noqa: E402
+from micron import (micron_parse, micron_page_bg, micron_media_target,  # noqa: E402
                     runs_to_markup)
 
 # Attachment storage styles:
@@ -1776,6 +1842,8 @@ class sHadesClientApp(MDApp):
 
     # -- lifecycle -------------------------------------------------------
     def build(self):
+        if BOOT_DEBUG:
+            _boot_mark("0.3 build(): python + kivy window alive")
         if Window:
             self.theme_cls.set_colors()
             Window.clearcolor = self.theme_cls.backgroundColor
@@ -1793,9 +1861,14 @@ class sHadesClientApp(MDApp):
         # Plain Enter sends the message; Shift+Enter inserts a newline
         # (multiline input). Handled via _on_key_down below.
         Window.bind(on_key_down=self._on_key_down)
+        if BOOT_DEBUG:
+            _boot_mark("screens ok: %d registered" % len(sm.screens))
+            _boot_install(sm.get_screen(sm.current))
         return sm
 
     def on_start(self):
+        if BOOT_DEBUG:
+            _boot_mark("on_start")
         # Try to resume a saved session
         sess = self._load_session()
         if sess and sess.get("hub_address"):
@@ -1817,6 +1890,10 @@ class sHadesClientApp(MDApp):
                         self._active_server_idx = idx
                         break
             self._open_main()
+            if BOOT_DEBUG:
+                _boot_mark("session resumed: %s" % (self.hub_address,))
+                Clock.schedule_once(
+                    lambda dt: _boot_reattach(self.root.current), 0)
             Clock.schedule_once(lambda dt: self._init_reticulum(), 0.5)
             # Re-render persisted history (embeds survive close/re-open) once
             # the guild API is up; server-stored attachments re-fetch with a
@@ -1828,6 +1905,8 @@ class sHadesClientApp(MDApp):
             # up (showing progress) and is used as the fallback if the
             # default hub is unreachable, so a fresh install is never locked
             # out of the app.
+            if BOOT_DEBUG:
+                _boot_mark("fresh install -> default hub")
             self._auto_connect_default_hub()
 
     def _auto_connect_default_hub(self):
@@ -2390,6 +2469,8 @@ class sHadesClientApp(MDApp):
     def _init_reticulum(self):
         """Main thread only: create RNS instance (signal handlers), then
         spawn a background thread for the blocking link establishment."""
+        if BOOT_DEBUG:
+            _boot_mark("RNS: writing config")
         try:
             storage = os.path.join(_app_data_dir(), "rns")
             os.makedirs(storage, exist_ok=True)
@@ -2448,6 +2529,8 @@ class sHadesClientApp(MDApp):
 
             reticulum = RNS.Reticulum(configdir=storage)
             self.reticulum = reticulum
+            if BOOT_DEBUG:
+                _boot_mark("RNS: instance up (config ok)")
         except Exception as e:
             print("init reticulum error:", repr(e))
             self._set_status("connect failed: %s" % e)
@@ -2456,6 +2539,8 @@ class sHadesClientApp(MDApp):
         # see _init_identity_and_lxmf. Only the blocking link work below
         # moves to a worker.
         self._init_identity_and_lxmf()
+        if BOOT_DEBUG:
+            _boot_mark("identity + LXMF router ok, link worker starting")
         threading.Thread(target=self._connect_after_rns, daemon=True).start()
 
     def _config_needs_update(self, cfgfile):

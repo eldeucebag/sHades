@@ -7,7 +7,9 @@ package.domain = io.eldeucebag
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 source.exclude_dirs = .git, .github, tests, __pycache__, build, dist, .buildozer
-version = 0.1
+version = 0.3
+# Bump version on every android-facing fix so the installed build can be
+# verified on-device (Settings > Apps > sHades) without adb.
 # wasmtime runs the micron applet sandbox on-device (applet_bridge.py).
 # It publishes an Android wheel tagged android_26_<abi>, so the NDK API
 # must be 26+ for p4a to select it -- at android_24 pip silently falls
@@ -20,7 +22,18 @@ version = 0.1
 # ImportError: PIL) before any widget exists -- the black screen on launch.
 # rns/lxmf/wasmtime pinned to match requirements.txt so both lanes ship
 # identical trees.
-requirements = python3,kivy,kivymd==2.0.0,pillow,rns==1.1.3,lxmf==0.9.4,wasmtime==50.0.1
+# Full dependency surface, named explicitly. Receipts from metadata:
+#   - kivymd==2.0.0 declares kivy>=2.3.0, pillow, materialyoucolor>=3.0.3,
+#     materialshapes>=0.3, asynckivy>=0.6,<0.7 (unpinned names resolve the
+#     same versions pip would; named here so nothing arrives unnoticed).
+#   - rns==1.1.3 declares cryptography + pyserial. Name cryptography so its
+#     p4a recipe compiles the native OpenSSL bindings against the NDK instead
+#     of relying on metadata-only resolution in the target env.
+# Touchscreen: no opt-in flag exists or is needed -- the android build is
+# SDL2-based (sdl2/sdl2_image/sdl2_ttf/sdl2_mixer + libmtdev recipes, which
+# p4a ships by default), and touch input on arm64-v8a needs minapi >= 26 +
+# ndk_api 26, exactly as pinned below. api 33 = modern Play/permission model.
+requirements = python3,kivy,kivymd==2.0.0,pillow,materialyoucolor,materialshapes,asynckivy,rns==1.1.3,cryptography,pyserial,lxmf==0.9.4,wasmtime==50.0.1
 orientation = portrait
 fullscreen = 0
 android.permissions = INTERNET,ACCESS_NETWORK_STATE,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
@@ -34,6 +47,16 @@ android.ndk_api = 26
 android.archs = arm64-v8a
 android.accept_sdk_license = True
 p4a.branch = develop
+# p4a.commit: pin python-for-android so the target python stays inside
+# kivy 2.3.1's supported range (3.8-3.13, kivy.org docs). p4a's python3
+# recipe moved its default to python 3.14.2 on BOTH master and develop
+# (receipt: libpython3.14.so inside the 0.2 APK; recipe source says
+# version = '3.14.2' on both branches). Kivy 2.3.1 on python 3.14 fails
+# silently at runtime -- exact black-screen symptom, no exception for the
+# crash console to catch. This commit is the last where the recipe
+# defaults to python 3.11.5 (inside the supported range); wasmtime's
+# android wheels are py3-none tags, so they survive the pin.
+p4a.commit = 2ebea90d9d7e965ef0754466abd185a41ab298aa
 
 [buildozer]
 
