@@ -46,8 +46,39 @@ def _log_path():
 
 
 _EXPORT_MIN_INTERVAL = 30.0
-_LAST_EXPORT_TS = [0.0]
-_EXPORT_IN_FLIGHT = [False]
+# tay's device logs (2026-11-25, two boots): main.py runs twice on p4a
+# -- once as __main__ via PyRun_SimpleFile and once as the module
+# "main" imported by kivy_client -- and each instance carried its own
+# stamp window, so 3 exports escaped the 30 s throttle for 3 tries.
+# Module state cannot cross instances; a FILE beside the launch log
+# can. The stamp holds the epoch of the last attempt and the
+# in-flight bit; a hard native death mid-copy is covered by a TTL,
+# not by the finally alone.
+_EXPORT_IN_FLIGHT_TTL = 60.0
+
+
+def _stamp_path():
+    """Shared throttle/in-flight stamp beside the launch log itself."""
+    return _log_path() + ".export"
+
+
+def _read_stamp():
+    """(epoch, in_flight), or (0.0, False) when absent or corrupt."""
+    try:
+        with open(_stamp_path(), "r", encoding="utf-8") as f:
+            parts = f.read().split()
+        return float(parts[0]), parts[1] == "1"
+    except Exception:
+        return 0.0, False
+
+
+def _write_stamp(in_flight):
+    """Never raises; an unwritable stamp degrades to per-attempt flow."""
+    try:
+        with open(_stamp_path(), "w", encoding="utf-8") as f:
+            f.write("%.3f %d\n" % (time.time(), 1 if in_flight else 0))
+    except Exception:
+        pass
 
 
 def _export_bootlog_for_user():
@@ -73,9 +104,11 @@ def _export_bootlog_for_user():
         return False
     # throttle at the real attempt: a stamp placed before these
     # probes would arm on dev no-ops and suppress a later attempt
-    now = time.monotonic()
-    if _LAST_EXPORT_TS[0] and now - _LAST_EXPORT_TS[0] < \
-            _EXPORT_MIN_INTERVAL:
+    now = time.time()
+    stamp_epoch, stamp_in_flight = _read_stamp()
+    if stamp_in_flight and now - stamp_epoch < _EXPORT_IN_FLIGHT_TTL:
+        return False
+    if now - stamp_epoch < _EXPORT_MIN_INTERVAL:
         return False
     # tay's crasher (0.36.22, 2026-11-20): a SLOW boot (>30 s) clears the
     # throttle, and the second export fired from _boot_file inside the
@@ -84,10 +117,10 @@ def _export_bootlog_for_user():
     # copy ok" -- no python traceback (main()'s wrapper never saw it).
     # Never run a second native copy while one is in flight; a reentrant
     # jnius/MediaStore call on the UI thread is exactly what killed it.
-    if _EXPORT_IN_FLIGHT[0]:
-        return False
-    _LAST_EXPORT_TS[0] = now
-    _EXPORT_IN_FLIGHT[0] = True
+    # The guard is the SHARED stamp now: it also holds across the two
+    # module instances, and the TTL caps an orphaned in-flight bit
+    # (process killed mid-copy) so exports can never lock out forever.
+    _write_stamp(True)
     try:
         act = autoclass("org.kivy.android.PythonActivity").mActivity
         SDK_INT = int(autoclass("android.os.Build$VERSION").SDK_INT)
@@ -171,7 +204,7 @@ def _export_bootlog_for_user():
         print("bootlog export failed:", e, flush=True)
         return False
     finally:
-        _EXPORT_IN_FLIGHT[0] = False
+        _write_stamp(False)
 
 
 class _Tee:

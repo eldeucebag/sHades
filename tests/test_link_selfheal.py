@@ -562,7 +562,10 @@ def test_bootlog_export_contract():
     assert "VOLUME_EXTERNAL_PRIMARY" not in main_src, \
         "the parent-class field lookup threw on tay's device (log)"
     assert "_EXPORT_MIN_INTERVAL" in main_src and \
-        "_LAST_EXPORT_TS" in main_src, "30 s attempt-throttle knob"
+        "_EXPORT_IN_FLIGHT_TTL" in main_src and \
+        "_stamp_path" in main_src and "_read_stamp" in main_src and \
+        "_write_stamp" in main_src and "+ \".export\"" in main_src, \
+        "shared stamp-file throttle + guard knobs (cross-instance state)"
     assert "DIRECTORY_DOWNLOADS" in main_src, "API 26-28 fallback route"
     assert "_display_name LIKE 'sHades_boot%.log'" in main_src, \
         "export-family row search: bare + stamped names, newest first"
@@ -791,8 +794,16 @@ def test_bootlog_bridge_contract():
     raises here instead of silently returning False on-device."""
     import main as main_mod
     calls, _fakeout = _fake_jnius_device(main_mod, None)
+
+    def stamp_stale():
+        """Drop the shared stamp: the next attempt must pass the guard."""
+        try:
+            os.unlink(main_mod._stamp_path())
+        except OSError:
+            pass
+
     try:
-        main_mod._LAST_EXPORT_TS[0] = 0.0  # order-independent lane
+        stamp_stale()  # order-independent lane
         with open(main_mod._log_path(), "w", encoding="utf-8") as f:
             f.write("== boot v0.36.4 ==\n")
         assert main_mod._export_bootlog_for_user() is True, \
@@ -816,7 +827,7 @@ def test_bootlog_bridge_contract():
             "java.nio.file.Files" in ac_names, "nio classes used"
         # overwrite lane: second run updates the known row
         calls.clear()
-        main_mod._LAST_EXPORT_TS[0] = 0.0  # fresh attempt window
+        stamp_stale()  # fresh attempt window
         with open(main_mod._log_path(), "a", encoding="utf-8") as f:
             f.write("second boot\n")
         assert main_mod._export_bootlog_for_user() is True
@@ -824,18 +835,18 @@ def test_bootlog_bridge_contract():
             "overwrite query before any insert"
         assert [c[0] for c in calls].count("insert") == 0, \
             "no (1).log stacking: query found the row, insert skipped"
-        # throttle sub-lane: within the interval there is NO MediaStore
-        # traffic; _log_path()'s own PythonActivity probe is by design
+        # the success above left a fresh stamp: with no reset, the next
+        # attempt is throttled -- proving the stamp really gates
         calls.clear()
         main_mod._EXPORT_MIN_INTERVAL = 60.0
-        main_mod._LAST_EXPORT_TS[0] = main_mod.time.monotonic()
         assert main_mod._export_bootlog_for_user() is False, \
-            "throttled attempt exits before the bridge"
+            "a just-written stamp throttles without any reset"
         bridge_calls = [c for c in calls if c[0] in
                         ("coll", "query", "insert", "openout", "copy")]
         assert bridge_calls == [], \
             "no MediaStore traffic while throttled: %s" % bridge_calls
         main_mod._EXPORT_MIN_INTERVAL = 0.0
+        stamp_stale()
         # tay's 0.36.22 crash (2026-11-20): a slow boot clears the
         # 30 s throttle and the second export from a _boot_file write
         # died inside the native copy, mid-stream. The in-flight guard
@@ -843,33 +854,41 @@ def test_bootlog_bridge_contract():
         # exits before ANY bridge call, and the flag always clears.
         main_file = open(main_mod.__file__,
                          encoding="utf-8").read()
-        assert "_EXPORT_IN_FLIGHT" in main_file,             "in-flight guard exists"
+        assert "_EXPORT_IN_FLIGHT_TTL" in main_file and \
+            "_write_stamp" in main_file and "_read_stamp" in main_file, \
+            "shared stamp guard exists"
         calls.clear()
-        main_mod._EXPORT_IN_FLIGHT[0] = True
-        main_mod._LAST_EXPORT_TS[0] = 0.0
+        main_mod._write_stamp(True)
         assert main_mod._export_bootlog_for_user() is False, \
             "in-flight export refuses before the bridge"
         hot = [c for c in calls if c[0] in
                ("coll", "query", "insert", "openout", "copy")]
         assert hot == [], \
             "no bridge traffic while a copy is in flight"
-        main_mod._EXPORT_IN_FLIGHT[0] = False
+        # TTL: a hard process death mid-copy leaves the in-flight bit
+        # written; the stamp must age out or exports lock out forever
+        with open(main_mod._stamp_path(), "w", encoding="utf-8") as f:
+            f.write("%.3f 1\n" % (main_mod.time.time() - 120.0))
         calls.clear()
-        main_mod._LAST_EXPORT_TS[0] = 0.0
         assert main_mod._export_bootlog_for_user() is True, \
-            "clear flag -> copy runs again"
-        assert main_mod._EXPORT_IN_FLIGHT[0] is False, \
-            "success clears the flag (finally)"
+            "TTL: an orphaned in-flight stamp cannot lock out forever"
+        assert main_mod._read_stamp()[1] is False, \
+            "the TTL pass rewrites the stamp not-in-flight (finally)"
         calls.clear()
-        main_mod._EXPORT_IN_FLIGHT[0] = False
-        main_mod._LAST_EXPORT_TS[0] = 0.0
+        stamp_stale()
+        assert main_mod._export_bootlog_for_user() is True, \
+            "no stamp -> copy runs again"
+        assert main_mod._read_stamp()[1] is False, \
+            "success clears the in-flight bit (finally)"
+        calls.clear()
+        stamp_stale()
         main_mod._FAKE_COPY_RAISES = [True]
         try:
             r = main_mod._export_bootlog_for_user()
         finally:
             main_mod._FAKE_COPY_RAISES[0] = False
-        assert r is False and main_mod._EXPORT_IN_FLIGHT[0] is \
-            False, "copy failure still clears the flag (finally)"
+        assert r is False and main_mod._read_stamp()[1] is \
+            False, "copy failure still clears the in-flight bit (finally)"
     finally:
         import sys as _sys
         del _sys.modules["jnius"]
