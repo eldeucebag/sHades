@@ -741,13 +741,15 @@ def test_resume_heal_rebuilds_lxmf_and_dead_links():
 
 def test_channel_management_gates_and_kinds():
     """v0.31.6 founder/channel work: the create-gate mirrors the server's
-    MANAGE_CHANNEL|ADMIN rule, and the kind chooser carries exactly tay's
-    three kinds (text / site (micron) / text stream -> chat / site / term)."""
+    MANAGE_CHANNEL|ADMIN rule, and the kind chooser carries tay's four
+    kinds (tay 2026-11-24 added voice: the server lane already accepted
+    kind "voice" - store.CHANNEL_KINDS, the /api/v1 voice join/roster
+    handlers - but the picker had no button for it)."""
 
     kind_map = dict(kc.sHadesClientApp.CHANNEL_KIND_LABELS)
-    check("kind chooser: exactly tay's three kinds",
+    check("kind chooser: tay's four kinds (text/site/term/voice)",
           kind_map == {"text": "chat", "site (micron)": "site",
-                       "text stream": "term"}, kind_map)
+                       "text stream": "term", "voice": "voice"}, kind_map)
 
     class _App(object):
         i_am_admin = False

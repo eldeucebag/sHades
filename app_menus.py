@@ -40,14 +40,19 @@ class MenusMixin:
     REACTION_PRESETS = ("👍", "👎", "😂", "❤️", "👀", "❓", "😮", "🙃",
                         "🎉", "🔥", "🙏", "👏", "💯", "🤔", "😭", "💀")
 
+    # tay 2026-11-24: voice channels had no create button, yet the
+    # server lane already carried kind "voice" (store.CHANNEL_KINDS +
+    # the voice join/roster handlers, sHades.py:2212) - the picker
+    # alone was missing it.
     CHANNEL_KIND_LABELS = (
         ("text", "chat"),
         ("site (micron)", "site"),
         ("text stream", "term"),
+        ("voice", "voice"),
     )
 
     def _open_create_channel_popup(self):
-        """Add a channel (text / site / text stream) -- the add half of
+        """Add a channel (text / site / text stream / voice) -- the add half of
         tay's "the creator should be able to add/delete channels". The
         delete half already exists in the channel context menu. Server
         enforces MANAGE_CHANNEL/ADMIN; a successful create lands in the
