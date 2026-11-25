@@ -124,7 +124,7 @@ class VoicePanelMixin:
             print("voice join: whoami has not answered yet; retry later")
             return False
         try:
-            import client_voice
+            import client_voice_core as core
             from app_voice import VoiceEngine
 
             class HubGate:
@@ -144,7 +144,7 @@ class VoicePanelMixin:
 
             engine = VoiceEngine(viewer=user_hash, hub=HubGate(self.guild_api))
             my_ident = RNS.Identity.from_file(self._identity_file())
-            lane = client_voice.VoiceLane(my_ident)
+            lane = core.VoiceLane(my_ident)
             my_dest = lane.open_listener(engine)
             engine.set_dest(my_dest)
             engine.set_link_factory(lane.dial_factory(engine))
@@ -157,11 +157,12 @@ class VoicePanelMixin:
                     mic = dev.AndroidMic()
                     speaker = dev.AndroidSpeaker()
                 else:
-                    mic = client_voice.MicSource()
-                    speaker = client_voice.SpeakerSink()
-            except client_voice.VoiceDeviceError as e:
+                    import client_voice as desk
+                    mic = desk.MicSource()
+                    speaker = desk.SpeakerSink()
+            except core.VoiceDeviceError as e:
                 print("voice devices unavailable (listen-only): %r" % e)
-            client_voice.bind(engine, mic=mic, speaker=speaker)
+            core.bind(engine, mic=mic, speaker=speaker)
             self._voice_engine = engine
             self._voice_lane = lane
             self._voice_mic = mic
