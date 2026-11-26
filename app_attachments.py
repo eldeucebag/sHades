@@ -104,6 +104,73 @@ class AttachmentsMixin:
         os.makedirs(d, exist_ok=True)
         return d
 
+    def _cached_attachment_blob(self, att):
+        """Resume-race fix (device log 15): server-stored rows re-fetch on
+        every restore, but a resume replay can fire before the guild link
+        is usable, the fetch returns empty, and the failure is terminal —
+        so a previously rendered embed comes back as 'attachment fetch
+        failed'. The blob of every successful fetch is already on disk
+        (_save_attachment_blob), so consult the local cache first: one
+        candidate matching the sanitized name (and the advertised size,
+        when known) renders instantly with zero network. Ambiguous or
+        missing → None → the normal fetch path."""
+        name = att.get("name") or ""
+        if not name:
+            return None
+        safe = "".join(c for c in name
+                       if c.isalnum() or c in "._-") or "attachment"
+        try:
+            size = int(att.get("size") or 0)
+        except Exception:
+            size = 0
+        try:
+            d = self._attachments_dir()
+            cands = [f for f in os.listdir(d) if f.endswith("_" + safe)]
+        except Exception:
+            return None
+        if size > 0:
+            kept = []
+            for f in cands:
+                try:
+                    if os.path.getsize(os.path.join(d, f)) == size:
+                        kept.append(f)
+                except OSError:
+                    pass
+            cands = kept
+        if len(cands) != 1:
+            return None
+        try:
+            with open(os.path.join(d, cands[0]), "rb") as f:
+                return f.read()
+        except Exception:
+            return None
+
+    def _att_fetch_attempts_pop(self, msg_id, row):
+        """Clear the retry counter of a resolved attachment (cache hit or
+        live render), so a later genuine failure gets its full 2-attempt
+        budget back; also keeps the lazily built dict from growing."""
+        attempts = getattr(self, "_att_fetch_attempts", None)
+        if not attempts:
+            return
+        for key in (msg_id, id(row)):
+            attempts.pop(key, None)
+
+    def _atts_link_ok(self):
+        """True when the guild link is usable for a request right now.
+        Used to pace attachment fetch retries: during boot/resume the
+        link can still be establishing (log 15: the replay fetch ran
+        before the session came up) — that state gets a retry, not a
+        terminal 'fetch failed'."""
+        try:
+            api = getattr(self, "guild_api", None)
+            if api is None:
+                return False
+            import RNS  # noqa: local import; the app already holds it
+            st = getattr(getattr(api, "link", None), "status", None)
+            return st is not None and st == RNS.Link.ACTIVE
+        except Exception:
+            return False
+
     def _add_attachment_embed(self, row, name, blob):
         """Render one attachment. tay's v0.30 spec: images render inline, or
         audio as play/pause/stop, download, volume and the stream itself
@@ -267,6 +334,35 @@ class AttachmentsMixin:
             dlog("_fetch_attachment: no path, skipping")
             return
 
+        # log 15: cache-first — a blob already on disk (saved by a
+        # previous successful fetch) renders with zero network, which
+        # also makes the resume race (replay before the link is up)
+        # harmless for anything embedded before.
+        cached = self._cached_attachment_blob(att)
+        if cached:
+            print(
+                f"[TRACE] _fetch_attachment: cache hit {len(cached)} bytes for {path}",
+                flush=True)
+            dlog(f"_fetch_attachment: cache hit {len(cached)} bytes for {path}")
+            self._att_fetch_attempts_pop(msg_id, row)
+
+            def apply_cached(dt, row=row, name=name, cached=cached):
+                try:
+                    main = self.root.get_screen("main")
+                    if main is None:
+                        return
+                    if msg_id and msg_id not in self._msg_widgets:
+                        grid = main.ids.message_grid
+                        if grid is not None and row.parent is None:
+                            grid.add_widget(row)
+                    self._add_attachment_embed(row, name, cached)
+                except Exception as e:
+                    print("[TRACE] cached embed failed: %r" % (e,),
+                          flush=True)
+                    dlog(f"cached embed failed: {e!r}")
+            Clock.schedule_once(apply_cached, 0)
+            return
+
         self._add_loading_placeholder(row, name)
 
         def work():
@@ -294,6 +390,32 @@ class AttachmentsMixin:
                 print(
                     f"[TRACE] _fetch_attachment.work: fetch returned empty for {path}", flush=True)
                 dlog(f"_fetch_attachment.work: fetch returned empty for {path}")
+                # log 15: a resume replay can beat the guild link up.
+                # Cap the whole row at 2 attempts; pace by readiness.
+                try:
+                    attempts = getattr(self, "_att_fetch_attempts", None)
+                    if attempts is None:
+                        attempts = self._att_fetch_attempts = {}
+                    key = msg_id or path or id(row)
+                    n = attempts.get(key, 0) + 1
+                    attempts[key] = n
+                    if n < 2:
+                        delay = 4.0 if self._atts_link_ok() else 8.0
+                        Clock.schedule_once(
+                            lambda dt, r=row, m=msg_id, a=att:
+                            self._fetch_attachment(r, m, a), delay)
+                        print(
+                            "[TRACE] _fetch_attachment: retry %d for %s in %.0fs"
+                            % (n, path, delay), flush=True)
+                        dlog("fetch empty, retry %d for %s in %.0fs"
+                             % (n, path, delay))
+                        Clock.schedule_once(
+                            lambda dt, m="attachment %s: link not ready, "
+                            "retrying" % name: self._set_status(m), 0)
+                        return
+                    attempts.pop(key, None)
+                except Exception as e:
+                    dlog("retry bookkeeping failed: %r" % (e,))
                 Clock.schedule_once(
                     lambda dt, m="attachment fetch failed: %s"
                     % name: self._set_status(m), 0)
@@ -307,6 +429,7 @@ class AttachmentsMixin:
                 f"[TRACE] _fetch_attachment.work: received {len(blob)} bytes "
                 f"for {path}", flush=True)
             dlog(f"_fetch_attachment.work: received {len(blob)} bytes for {path}")
+            self._att_fetch_attempts_pop(msg_id, row)
 
             def apply(dt):
                 try:
@@ -336,11 +459,16 @@ class AttachmentsMixin:
         threading.Thread(target=work, daemon=True).start()
 
     def _add_loading_placeholder(self, row, name=""):
-        """Show a loading placeholder in the row's embed container."""
+        """Show a loading placeholder in the row's embed container.
+
+        log 15 (retry): a retried fetch re-entered this with the first
+        placeholder still up, so the row kept a shimmer skeleton above
+        the real embed forever. Adding now REPLACES any live one."""
         print(
             f"[TRACE] _add_loading_placeholder: "
             f"row={row.msg_id[:12] if row.msg_id else '?'}", flush=True)
         dlog(f"_add_loading_placeholder: row={row.msg_id[:12] if row.msg_id else '?'}")
+        self._remove_placeholder(row)
         if self._attachment_kind(name) == "image":
             # Polish group 8: images get the shimmer skeleton instead
             # of the text line. The classifier is the same one

@@ -24,6 +24,10 @@ FRAME_SAMPLES = 960          # 20 ms at 48 kHz
 CHANNELS = 1
 FRAME_BYTES = FRAME_SAMPLES * 2   # 16-bit mono PCM per frame
 DEFAULT_BITRATE = 24000
+# libopus constants (ctypes binding): OPUS_APPLICATION_VOIP 2048,
+# OPUS_SET_BITRATE_REQUEST 4002
+_OPUS_APP_VOIP = 2048
+_OPUS_SET_BITRATE = 4002
 
 
 class VoiceCodecUnavailable(Exception):
@@ -104,55 +108,90 @@ class VoiceCodec(object):
         if not path:
             raise VoiceCodecUnavailable(
                 "libopus not found (set HADES_OPUS_LIB to the dll path)")
-        # opuslib's loader goes through ctypes.util.find_library; keep
-        # the absolute-path probe deterministic by feeding the locator
-        # the path we found.
-        self._orig_find = ctypes.util.find_library
-
-        def _find(name, _path=path, _orig=self._orig_find):
-            if name == "opus":
-                if os.path.isfile(_path):
-                    return _path
-            return _orig(name)
-        ctypes.util.find_library = _find
+        # pure-ctypes binding, no pure-python opuslib dependency: the APK
+        # ships only the opus C recipe (opuslib + cffi are not in the
+        # device package list), so opuslib's import raised "the binding
+        # failed to import" on every device join even with libopus.so
+        # sitting in nativeLibraryDir (receipt: device log 8, build
+        # Nov 25 19:17). This binding loads the .so directly.
         try:
-            import opuslib
-        except Exception:
-            ctypes.util.find_library = self._orig_find
+            lib = ctypes.CDLL(path)
+        except OSError as e:
             raise VoiceCodecUnavailable(
-                "libopus found at %s but the binding failed to import"
-                % path)
-        finally:
-            ctypes.util.find_library = self._orig_find
-        self._opuslib = opuslib
-        self._enc = opuslib.Encoder(
-            SAMPLE_RATE, CHANNELS,
-            application=opuslib.APPLICATION_VOIP)
-        # Speech-optimised VoIP mode; bitrate via the ctl property.
-        self._enc.bitrate = bitrate
-        self._dec = opuslib.Decoder(SAMPLE_RATE, CHANNELS)
+                "libopus at %s failed to load: %r" % (path, e))
+        lib.opus_encoder_create.restype = ctypes.c_void_p
+        lib.opus_encoder_create.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int)]
+        lib.opus_decoder_create.restype = ctypes.c_void_p
+        lib.opus_decoder_create.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+        lib.opus_encode.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p,
+            ctypes.c_int]
+        lib.opus_encode.restype = ctypes.c_int
+        lib.opus_decode.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int16), ctypes.c_int, ctypes.c_int]
+        lib.opus_decode.restype = ctypes.c_int
+        # opus_encoder_ctl is variadic; fixed 3-arg shape fits every
+        # call this binding makes (one int request + one int value)
+        lib.opus_encoder_ctl.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        lib.opus_encoder_ctl.restype = ctypes.c_int
+        err = ctypes.c_int(0)
+        enc = lib.opus_encoder_create(
+            SAMPLE_RATE, CHANNELS, _OPUS_APP_VOIP, ctypes.byref(err))
+        if not enc or err.value != 0:
+            raise VoiceCodecUnavailable(
+                "opus_encoder_create failed (err %d)" % err.value)
+        # speech-optimised VoIP application (2048); set the bitrate the
+        # same way opuslib's Encoder.bitrate property did
+        if lib.opus_encoder_ctl(enc, _OPUS_SET_BITRATE, int(bitrate)) != 0:
+            lib.opus_encoder_destroy(enc)
+            raise VoiceCodecUnavailable("opus_encoder_ctl bitrate failed")
+        err = ctypes.c_int(0)
+        dec = lib.opus_decoder_create(
+            SAMPLE_RATE, CHANNELS, ctypes.byref(err))
+        if not dec or err.value != 0:
+            lib.opus_encoder_destroy(enc)
+            raise VoiceCodecUnavailable(
+                "opus_decoder_create failed (err %d)" % err.value)
+        self._opus = lib
+        self._enc = enc
+        self._dec = dec
+        self._enc_out = ctypes.create_string_buffer(4000)
+        self._dec_out = (ctypes.c_int16 * FRAME_SAMPLES)()
 
     def encode(self, pcm):
         """One 20 ms frame: 960 int16 mono samples -> opus bytes."""
         if len(pcm) != FRAME_BYTES:
             raise ValueError("pcm frame must be %d bytes" % FRAME_BYTES)
-        return self._enc.encode(pcm, FRAME_SAMPLES)
+        n = self._opus.opus_encode(
+            self._enc, pcm, FRAME_SAMPLES,
+            ctypes.addressof(self._enc_out), len(self._enc_out))
+        if n < 0:
+            raise RuntimeError("opus_encode failed (%d)" % n)
+        return bytes(self._enc_out[:n])
 
     def decode(self, data):
         """opus bytes (or None for PLC) -> 960-sample int16 mono frame.
 
-        PLC goes straight to the api layer: the wrapper class crashes
-        on len(None), and the api default sizes its buffer for two
-        channels, so the concealment frame is sliced to one channel.
+        None goes to opus_decode with a NULL input: packet loss
+        concealment, one mono frame of comfort noise, never a stall.
         Dropped packets surface as one None per missing frame; the
         jitter layer calls this per frame.
         """
         if data is None:
-            out = self._opuslib.api.decoder.decode(
-                self._dec.decoder_state, None, 0, FRAME_SAMPLES, False)
-            return out[:FRAME_BYTES]
-        return self._dec.decode(bytes(bytearray(data)), FRAME_SAMPLES,
-                                decode_fec=False)
+            n = self._opus.opus_decode(
+                self._dec, None, 0, self._dec_out, FRAME_SAMPLES, 0)
+        else:
+            n = self._opus.opus_decode(
+                self._dec, bytes(bytearray(data)), len(data), self._dec_out,
+                FRAME_SAMPLES, 0)
+        if n < 0:
+            raise RuntimeError("opus_decode failed (%d)" % n)
+        return bytes(self._dec_out)
 
 
 def encode_packet(codec, frames):

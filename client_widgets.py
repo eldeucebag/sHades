@@ -1064,15 +1064,47 @@ class ClickableLabel(ContextMenuMixin, ButtonBehavior, Label):
         return actions
 
 
+class _MiniTap(ButtonBehavior, Label):
+    """Tiny tappable text: press fires the callback (down=True); the
+    hold variant also fires release (down=False) for push-to-talk."""
+
+    def __init__(self, **kw):
+        self._hold = kw.pop("hold", False)
+        self._cb = kw.pop("cb", None)
+        super().__init__(font_size=sp(10), halign="left", valign="middle",
+                         **kw)
+        self.bind(size=lambda inst, s: setattr(inst, "text_size",
+                                               (s[0], s[1])))
+
+    def on_press(self):
+        if self._cb is not None:
+            self._cb(True)
+
+    def on_release(self):
+        if self._cb is not None and self._hold:
+            self._cb(False)
+
+
+VOICE_MODE_CHOICES = (("always", "always"), ("ptt", "ptt"), ("voc", "vad"))
+
+
 class VoiceRow(BoxLayout):
     """One voice channel's roster row on the rail (item 6).
 
-    Renders "n in call" plus up to three names, and a Join/Leave
-    affordance. Press routes to the app's voice panel actions through
-    bind_action; while in-call, Mute/Unmute joins the panel's state.
+    Head line ("n in call") plus one line per connected member. tay
+    2026-11-25: connected users list under the channel, and the member
+    line turns green while that peer transmits (voice dest inside the
+    speaking set; the you-row is green while this client's own tx is
+    live). While joined, a mini row picks the tx mode - always / ptt /
+    voc (vad) - and ptt adds a hold control. Press on the row routes to
+    the app's voice panel actions through bind_action; while in-call,
+    Mute/Unmute joins the panel's state (double-tap).
     """
 
     channel_name = StringProperty("")
+
+    GREEN = [0.30, 0.85, 0.42, 1]
+    DIM = [0.55, 0.55, 0.55, 1]
 
     def __init__(self, **kw):
         super().__init__(orientation="horizontal", size_hint_y=None,
@@ -1091,17 +1123,32 @@ class VoiceRow(BoxLayout):
         self._members = []
         self._joined = False
         self._muted = False
+        self._member_lines = []
+        self._mode_widgets = None
+        self._speaking = set()
+        self._tx_mode = None
+        self._self_speaking = False
+        self._my_viewer = ""
         self._on_join = self._on_leave = self._on_mute = None
+        self._on_mode = self._on_ptt = None
         self.bind(on_touch_down=self._tap_dispatch)
 
-    def bind_action(self, on_join, on_leave, on_mute):
+    def bind_action(self, on_join, on_leave, on_mute, on_mode=None,
+                    on_ptt=None):
         self._on_join, self._on_leave, self._on_mute = (
             on_join, on_leave, on_mute)
+        self._on_mode = on_mode
+        self._on_ptt = on_ptt
 
-    def render(self, members, joined=False, muted=False):
+    def render(self, members, joined=False, muted=False, speaking=None,
+               tx_mode=None, self_speaking=False, my_viewer=""):
         self._members = members or []
         self._joined = joined
         self._muted = muted
+        self._speaking = set(speaking or [])
+        self._tx_mode = tx_mode
+        self._self_speaking = self_speaking
+        self._my_viewer = my_viewer or ""
         names = ", ".join(str(m.get("viewer", ""))[:4]
                           for m in self._members[:3])
         count = len(self._members)
@@ -1111,6 +1158,72 @@ class VoiceRow(BoxLayout):
                             if names else head)
         self._cta.text = ("leave" if self._joined else
                           "join")
+        self._render_modes()
+
+    def _render_modes(self):
+        want = self._joined and self._on_mode is not None
+        if want and self._mode_widgets is None:
+            self._build_modes()
+        if self._mode_widgets is not None and not want:
+            self.remove_widget(self._mode_widgets["row"])
+            self._mode_widgets = None
+        elif self._mode_widgets is not None:
+            mode = self._tx_mode or "always"
+            for label, m in VOICE_MODE_CHOICES:
+                self._mode_widgets["btns"][label].color = \
+                    self.GREEN if m == mode else self.DIM
+        self._render_members()
+
+    def _render_members(self):
+        """One line per connected member; green while transmitting."""
+        want = min(len(self._members), 4)
+        while len(self._member_lines) < want:
+            lbl = Label(font_size=sp(9), halign="left", valign="middle",
+                        color=self.DIM)
+            lbl.bind(size=lambda inst, s: setattr(
+                inst, "text_size", (s[0], s[1])))
+            self.add_widget(lbl)
+            self._member_lines.append(lbl)
+        for idx, lbl in enumerate(self._member_lines):
+            if idx >= want:
+                lbl.text = ""
+                continue
+            m = self._members[idx]
+            viewer = str(m.get("viewer", ""))
+            is_me = bool(self._my_viewer) and viewer.startswith(
+                self._my_viewer)
+            dest = m.get("dest") or ""
+            hot = bool(dest) and dest in self._speaking
+            tag = "you" if is_me else viewer[:8]
+            if is_me and self._joined and self._self_speaking:
+                hot = True
+            lbl.text = ("   %s - speaking" % tag) if hot \
+                else ("   %s" % tag)
+            lbl.color = self.GREEN if hot else self.DIM
+        self.height = dp(22) + dp(15) * want \
+            + (dp(48) if self._mode_widgets is not None else 0)
+
+    def _build_modes(self):
+        row = BoxLayout(orientation="vertical", size_hint_y=None,
+                        height=dp(48), padding=(dp(24), 0, dp(6), 0))
+        picks = BoxLayout(orientation="horizontal", size_hint_y=None,
+                          height=dp(22), spacing=dp(6))
+        btns = {}
+        for label, m in VOICE_MODE_CHOICES:
+            t = _MiniTap(text=label, color=self.DIM, size_hint_x=None,
+                         width=dp(38),
+                         cb=(lambda down, m=m: self._on_mode(
+                             self.channel_name, m)))
+            btns[label] = t
+            picks.add_widget(t)
+        hold = _MiniTap(text="hold (ptt)", color=self.GREEN,
+                        size_hint_x=None, width=dp(74), hold=True,
+                        cb=lambda down: self._on_ptt(self.channel_name,
+                                                     down))
+        row.add_widget(picks)
+        row.add_widget(hold)
+        self.add_widget(row)
+        self._mode_widgets = {"row": row, "btns": btns, "hold": hold}
 
     def _tap_dispatch(self, inst, touch):
         if not self.collide_point(*touch.pos):

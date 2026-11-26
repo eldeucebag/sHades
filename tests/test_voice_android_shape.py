@@ -51,9 +51,14 @@ class _FakeAudioRecord:
     def startRecording(self):
         self.state = 3
 
-    def read(self, buf, size):
+    def read(self, buf, offset_in_bytes, size):
+        # Android's byte[] overload is read(byte[], int, int) - the
+        # 2-arg call matches no Java surface (device log 12, jnius):
+        # the real device needs offset 0 explicitly.
         if size != FRAME_BYTES:
             return -1                       # wrong overload use: loud
+        if offset_in_bytes != 0:
+            return -2
         # 960 s16 mono frame; a quiet sine stands in for capture
         import math
         self._phase += voice_codec.FRAME_SAMPLES
@@ -184,9 +189,54 @@ def desktop_no_jnius():
         check("desktop without jnius raises", False, repr(e))
 
 
+def permission_reap_lane():
+    """Device log 13: a grant completing inside the dialog lets the
+    same join proceed - check, request, re-check - instead of owing a
+    second tap. Stubs android.permissions in sys.modules for the lane."""
+    import sys
+    import types
+    import client_voice_android as dev
+    calls = {"n": 0}
+    reqs = []
+
+    perm = types.ModuleType("android.permissions")
+
+    class P:
+        RECORD_AUDIO = "android.permission.RECORD_AUDIO"
+
+    def perm_check(name):
+        calls["n"] += 1
+        # order: 1 pre-dialog (missing), 2 post-dialog (granted)
+        return calls["n"] >= 2
+
+    def request_permissions(whats):
+        reqs.append(list(whats))
+        return {P.RECORD_AUDIO: True}
+
+    perm.check_permission = perm_check
+    perm.Permission = P
+    perm.request_permissions = request_permissions
+    android_pkg = types.ModuleType("android")
+    android_pkg.permissions = perm
+    saved = {k: sys.modules.get(k) for k in ("android", "android.permissions")}
+    sys.modules["android"] = android_pkg
+    sys.modules["android.permissions"] = perm
+    try:
+        ok = dev._mic_permission_missing() is False
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+    check("grant mid-join reaps (same join goes live)",
+          ok and reqs and reqs[0][0] == P.RECORD_AUDIO, reqs)
+
+
 def main():
     print("frame geometry: FRAME_BYTES=%d" % FRAME_BYTES)
     desktop_no_jnius()
+    permission_reap_lane()
     mic_shape()
     speaker_shape()
     stream_type_semantics()

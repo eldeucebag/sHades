@@ -85,9 +85,15 @@ class VoiceLane:
 
     def open_listener(self, engine, announce=True):
         """IN destination on the client identity; raw voice packets from
-        any peer's link feed engine.accept_inbound."""
+        any peer's link feed engine.accept_inbound. Idempotent: RNS
+        rejects a second registration of one identity's hash, so a
+        re-entry reuses the live destination instead of dying there."""
         import RNS
         self.engine = engine
+        if self._dest is not None:
+            return (self._dest.hash.hex()
+                    if hasattr(self._dest.hash, "hex")
+                    else self._dest.hash)
         self._dest = RNS.Destination(
             self.identity, RNS.Destination.IN, RNS.Destination.SINGLE,
             self.APP_NAME, self.ASPECT)

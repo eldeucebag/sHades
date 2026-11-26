@@ -19,7 +19,7 @@ _update(dt) calls, so no real time has to elapse.
 - a live theme change re-tints the button; a missing theme key never
   raises (empty theme_colors falls back to DESIGN.md hex); an unknown
   variant falls back to primary
-- KV wiring: kv_md.kv converts 25 buttons to FancyMDButton and leaves
+- KV wiring: kv_md.kv converts 27 buttons to FancyMDButton and leaves
   exactly the 5 deliberate plain MDButtons (text-style People / site
   nav Back+Forward / reply cancel, and the add-channel button whose
   visibility is an opacity binding)
@@ -284,7 +284,7 @@ def run_checks(app):
     check("unknown variant falls back to filled style",
           odd.style == "filled", repr(odd.style))
 
-    # --- KV wiring: 25 converted (split-base counts; the tarball's
+    # --- KV wiring: 26 converted (split-base counts; the tarball's
     # split client builds the rest in modules, not kv) ---
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "..", "kv_md.kv")) as f:
@@ -293,8 +293,8 @@ def run_checks(app):
              if ln.strip() == "MDButton:"]
     fancy = [ln for ln in kv.splitlines()
              if ln.strip() == "FancyMDButton:"]
-    check("kv converts 25 buttons to FancyMDButton",
-          len(fancy) == 25, "got %d" % len(fancy))
+    check("kv converts 28 buttons to FancyMDButton",
+          len(fancy) == 28, "got %d" % len(fancy))
     check("kv leaves exactly 5 plain MDButtons", len(plain) == 5,
           "got %d" % len(plain))
     check("kv keeps 4 text-style plain buttons",
@@ -303,11 +303,11 @@ def run_checks(app):
     check("kv keeps the add-channel button plain (opacity visibility)",
           "id: add_channel_btn" in kv
           and "style: 'outlined'" in kv, "add_channel_btn changed")
-    check("kv primary variants number 8",
-          kv.count("variant: 'primary'") == 8,
+    check("kv primary variants number 9",
+          kv.count("variant: 'primary'") == 9,
           "got %d" % kv.count("variant: 'primary'"))
-    check("kv outlined variants number 16",
-          kv.count("variant: 'outlined'") == 16,
+    check("kv outlined variants number 18",
+          kv.count("variant: 'outlined'") == 18,
           "got %d" % kv.count("variant: 'outlined'"))
     check("kv danger variant is the delete button only",
           kv.count("variant: 'danger'") == 1,

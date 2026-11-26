@@ -565,6 +565,10 @@ class SiteMixin:
             if not blob:
                 return
             fpath = self._save_attachment_blob(blob, name)
+            if not fpath:
+                # save failed (no cache dir etc.): keep the empty box
+                # rather than assigning None into MessageEmbed.source
+                return
 
             def _land(dt):
                 emb.source = fpath

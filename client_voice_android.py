@@ -19,9 +19,13 @@ import time
 
 import voice_codec
 
-
-class VoiceDeviceError(Exception):
-    pass
+# one error identity across the device layers: the panel catches the
+# core's VoiceDeviceError, so a local class here would escape the
+# listen-only handler (receipt: device log 9 - "AudioRecord init
+# failed" escaped as an exception of the local class, the setup aborted
+# after the lane registered, and every re-join died with RNS's
+# "already registered destination")
+from client_voice_core import VoiceDeviceError
 
 
 FRAME_BYTES = voice_codec.FRAME_BYTES        # 1920 (960 samples, s16)
@@ -60,6 +64,7 @@ def _audio_classes(test_overrides=None):
         base = dict(_TEST_BASE)
         base["source"] = 0            # MediaRecorder.AudioSource.DEFAULT
         base.update(test_overrides)
+        base["mocked"] = True
         return base
     autoclass = _jni()
     fmt = autoclass("android.media.AudioFormat")
@@ -82,7 +87,38 @@ def _audio_classes(test_overrides=None):
         "STREAM_MUSIC": 3,
         "MODE_STREAM": 1,
         "STATE_UNINITIALIZED": 0,
+        "mocked": False,
     }
+
+
+def _mic_permission_missing():
+    """True when the RECORD_AUDIO runtime grant is absent; fires the
+    grant dialog when it is, then re-checks: p4a's helper resolves the
+    dialog from the calling thread without a re-join (device log 13 -
+    join -> dialog -> grant landed, but the join still owed a second
+    tap; now a grant inside the dialog goes live immediately). A denial
+    or a permanent block keeps this join listen-only with the named
+    reason; the next one reaps any later grant."""
+    try:
+        from android.permissions import check_permission, Permission
+    except Exception:
+        return False
+    try:
+        if check_permission(Permission.RECORD_AUDIO):
+            return False
+    except Exception:
+        return False
+    try:
+        from android.permissions import request_permissions
+        request_permissions([Permission.RECORD_AUDIO])
+    except Exception:
+        pass
+    try:
+        if check_permission(Permission.RECORD_AUDIO):
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def min_buffer(rec_cls, fmt_cls, rate, encoding, channel):
@@ -98,6 +134,8 @@ class AndroidMic:
                  channels=1):
         self.rate, self.channels = rate, channels
         cls = _audio_classes(test_overrides=jnius_overrides)
+        self._perm_missing = (False if cls.get("mocked")
+                              else _mic_permission_missing())
         buf_min = cls["AudioRecord"].getMinBufferSize(
             rate, cls["CHANNEL_IN_MONO"], cls["ENCODING_PCM_16BIT"])
         if buf_min <= 0:
@@ -112,6 +150,10 @@ class AndroidMic:
             cls["ENCODING_PCM_16BIT"], max(buf_min, FRAME_BYTES * 10))
         state = getattr(self._rec, "getState", None)
         if state is not None and state() == cls["STATE_UNINITIALIZED"]:
+            if not cls.get("mocked") and self._perm_missing:
+                raise VoiceDeviceError(
+                    "AudioRecord init failed (RECORD_AUDIO permission "
+                    "not granted; allow the mic and re-join)")
             raise VoiceDeviceError("AudioRecord init failed")
         self._reader = threading.Thread(target=self._loop, daemon=True)
         self.frames_read = 0
@@ -124,9 +166,11 @@ class AndroidMic:
         read = self._rec.read
         buf = self._buf
         while not self._stop.is_set():
-            # jnius: read(byte[], int) fills in place and returns the
-            # byte count; a bare read(int) has no Java overload
-            n = read(buf, FRAME_BYTES)
+            # jnius: AudioRecord.read's byte[] overload is the 3-arg
+            # read(byte[] buf, int offsetInBytes, int sizeInBytes);
+            # the 2-arg call matches no Java surface (device log 12:
+            # jnius.JavaException - available: ([BII)I for bytes)
+            n = read(buf, 0, FRAME_BYTES)
             if not isinstance(n, int) or n != FRAME_BYTES:
                 continue
             with self._lock:

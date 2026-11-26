@@ -891,6 +891,8 @@ class CtxHeaderLabel(ContextMenuMixin, Label):
         if app and getattr(app, "i_am_admin", False):
             actions.append(("server settings", True,
                             lambda: app and app._open_admin_panel()))
+        actions.append(("profile config", True,
+                        lambda: app and app.open_config()))
         actions.append(("copy boot log", True,
                         lambda: app and app._copy_bootlog()))
         return actions
@@ -977,6 +979,8 @@ if KIVY:
             if app and getattr(app, "i_am_admin", False):
                 actions.append(("server settings", True,
                                 lambda: app and app._open_admin_panel()))
+            actions.append(("profile config", True,
+                            lambda: app and app.open_config()))
             actions.append(("copy boot log", True,
                             lambda: app and app._copy_bootlog()))
             actions.append(("remove server", True,
@@ -1454,6 +1458,58 @@ if KIVY:
             # old c_<key> id convention is replaced by this dict.
             self._color_fields = {}
             self._color_labels = []
+            self._voice_page = None
+
+        def switch_tab(self, tab):
+            """Profile config tabs (tay 2026-11-25): 'general' keeps the
+            original appearance rows; 'voice' is the user settings
+            submenu (tx mode, voc threshold, ptt key). Tabs swap the
+            scroll content by widget add/remove, so the minimum-height
+            KV bindings never fight a python height override."""
+            try:
+                tb = self.ids["tab_general"]
+                tv = self.ids["tab_voice"]
+                host = self.ids["config_host"]
+                pages = self.ids["config_pages"]
+                foot = self.ids.get("config_footer")
+                general = tab != "voice"
+                tb.variant = "primary" if general else "outlined"
+                tv.variant = "primary" if not general else "outlined"
+                host.remove_widget(pages)
+                if self._voice_page is not None:
+                    self._voice_page.stop_capture()
+                    host.remove_widget(self._voice_page)
+                if general:
+                    host.add_widget(pages)
+                    if foot is not None:
+                        foot.height = dp(56)
+                        foot.opacity = 1
+                else:
+                    self._ensure_voice_page()
+                    if foot is not None:
+                        foot.height = 0
+                        foot.opacity = 0
+            except Exception as e:
+                print("profile-config tab switch failed:", repr(e))
+
+        def _ensure_voice_page(self):
+            """Build the user settings page (voice rows) once; it saves
+            instantly, so no footer applies to it. The page hosts
+            directly in the scroll host: the parked voice_host container
+            sat inside config_pages (height 0, opacity 0), which
+            switch_tab had just removed -- adding there rendered an
+            empty tab on every platform (tay 2026-11-26 photo)."""
+            if self._voice_page is not None:
+                return
+            try:
+                from ui_user_settings import VoiceSettingsPage
+                host = self.ids["config_host"]
+                page = VoiceSettingsPage(
+                    client=App.get_running_app())
+                host.add_widget(page)
+                self._voice_page = page
+            except Exception as e:
+                print("voice settings page unavailable:", repr(e))
 
         def _ensure_color_rows(self):
             """Build one Label+MDTextField row per THEME_KEYS entry (once)."""
@@ -1508,6 +1564,8 @@ if KIVY:
                 self.ids["config_status"].text = ""
             except Exception:
                 pass
+            # predictable entry point: appearance tab first
+            self.switch_tab("general")
 
         def _prefill_fields(self):
             from kivy.app import App as _App

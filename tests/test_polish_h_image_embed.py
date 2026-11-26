@@ -171,6 +171,12 @@ class StubApp(object):
         self._attachments_dir = lambda: self._attach_dir
         self._save_attachment_blob = functools.partial(
             kivy_client.sHadesClientApp._save_attachment_blob, self)
+        self._cached_attachment_blob = functools.partial(
+            kivy_client.sHadesClientApp._cached_attachment_blob, self)
+        self._atts_link_ok = functools.partial(
+            kivy_client.sHadesClientApp._atts_link_ok, self)
+        self._att_fetch_attempts_pop = functools.partial(
+            kivy_client.sHadesClientApp._att_fetch_attempts_pop, self)
         self._add_attachment_embed = functools.partial(
             kivy_client.sHadesClientApp._add_attachment_embed, self)
         self._fetch_attachment = functools.partial(
@@ -404,6 +410,14 @@ def main():
             ui_fx.set_reduced_motion(False)
 
         # --- 7. fetch flow: skeleton, then embed -----------------------
+        # clear the blob cache first: the site-embed lanes above saved
+        # shot.png, and the resume-race cache-first restore would render
+        # it with zero network (that contract has its own battery);
+        # recreate the dir since this stub's _attachments_dir does not
+        # makedirs the way production does
+        import shutil
+        shutil.rmtree(app._attach_dir, ignore_errors=True)
+        os.makedirs(app._attach_dir, exist_ok=True)
         row3 = FakeRow("m-fetch-img")
         app._msg_widgets["m-fetch-img"] = row3
         app._fetch_attachment(
@@ -465,6 +479,28 @@ def main():
         check("failed fetch shows the skeleton while in flight",
               _skeleton_of(row5._loading_placeholder) is not None)
         _release_threads()
+        # resume-race contract: the first miss with the link not ready
+        # RETRIES (placeholder up, no terminal error yet); the second miss
+        # is the capped terminal named error
+        check("first missed fetch retries, placeholder stays up",
+              row5._loading_placeholder is not None
+              and row5.ids.embed_container.children
+              == [row5._loading_placeholder]
+              and any(s.endswith("link not ready, retrying")
+                      for s in app.status)
+              and not any("attachment fetch failed" in s
+                          for s in app.status),
+              repr(app.status[-2:]))
+        # drain the retry chain this instant-clock harness spawns: under
+        # _NowClock each Clock schedule fires inline, so one release runs
+        # a retry body that queues the next work; the capped attempt
+        # lands the terminal named error and clears the placeholder
+        for _ in range(6):
+            _release_threads()
+            if (row5._loading_placeholder is None
+                    and any(s == "attachment fetch failed: gone.png"
+                            for s in app.status)):
+                break
         check("failed fetch removes the placeholder",
               row5._loading_placeholder is None
               and row5.ids.embed_container.children == [])
@@ -473,7 +509,7 @@ def main():
         check("failed fetch reports in the status line",
               any(s == "attachment fetch failed: gone.png"
                   for s in app.status),
-              repr(app.status))
+              repr(app.status[-2:]))
 
         # --- 10. site media: same reveal on landing --------------------
         site = types.SimpleNamespace(

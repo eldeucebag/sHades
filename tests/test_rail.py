@@ -167,7 +167,18 @@ def main():
     actions = rail2[0].build_context_menu()
     labels = [a[0] for a in actions]
     check("non-admin loses the settings item",
-          not any("settings" in l for l in labels), labels)
+          not any("server settings" in l for l in labels), labels)
+    # profile config (tabbed: appearance + voice) reaches every user; the
+    # config screen is its only route (device log 15: the tabs existed
+    # but nothing opened the screen after the standalone entry was removed)
+    check("profile config reaches every user",
+          any("profile config" in l for l in labels), labels)
+    sm.add_widget(kc.ConfigScreen(name="config"))
+    entry = next(a for a in actions if a[0] == "profile config")
+    entry[2]()
+    check("profile config entry lands on the config screen",
+          sm.current == "config", sm.current)
+    sm.current = "main"
     check("non-admin keeps remove server",
           any("remove" in l for l in labels), labels)
     app.i_am_admin = True

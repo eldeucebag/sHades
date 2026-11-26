@@ -176,6 +176,37 @@ def main():
         sent["data"]["body"] == base64.b64encode(b"\x00\x05codecpkt").decode()
     check("voice_publish b64 payload", ok, sent.get("data"))
 
+    # tay 2026-11-25: member lines go green while transmitting (dest in
+    # the speaking set; the you-row green while this client's tx is
+    # live), and dim again when nobody transmits
+    row = app._voice_row_for("voicerow-lane", "v" * 32)
+    members = [
+        {"viewer": app.my_user_hash, "dest": "0" * 32, "muted": False},
+        {"viewer": "abcd1234" + "0" * 56, "dest": "f" * 32, "muted": False},
+    ]
+    row.render(members, joined=True,
+               speaking=["f" * 32], tx_mode="always",
+               self_speaking=True, my_viewer=app.my_user_hash)
+    ok = row._member_lines[0].color == row.GREEN \
+        and row._member_lines[0].text.find("you") >= 0
+    ok2 = row._member_lines[1].color == row.GREEN \
+        and row._member_lines[1].text.find("speaking") >= 0
+    check("member lines go green while transmitting", ok and ok2)
+    row.render(members, joined=True, speaking=[], tx_mode="always",
+               self_speaking=False, my_viewer=app.my_user_hash)
+    ok = row._member_lines[0].color == row.DIM \
+        and row._member_lines[1].color == row.DIM
+    check("member lines dim again when nobody transmits", ok)
+
+    # the tx-mode pick routes the panel tap into the real engine
+    import app_voice as av
+    eng3 = av.VoiceEngine()
+    app._voice_engine = eng3
+    app._voice_tap_mode("voicerow-lane", "vad")
+    app._voice_tap_ptt("voicerow-lane", True)
+    check("tx-mode pick reaches the engine",
+          eng3.voice_mode == "vad" and eng3._ptt_down)
+
     # engine teardown is clean in-app: leave clears the room
     app._voice_room_cid = None
     eng.leave_r = True

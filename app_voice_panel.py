@@ -36,6 +36,54 @@ class VoicePanelMixin:
         self._voice_muted = False
         self._voice_rows = {}           # cid -> VoiceRow
         self._voice_lock = threading.RLock()
+        # tay 2026-11-25 (user settings): persisted tx prefs + the ptt
+        # key dispatch; the settings screen writes through the same
+        # client_voice_prefs store (voice.json beside the other prefs)
+        self._voice_prefs = {}
+        try:
+            import client_voice_prefs as vpref
+            self._voice_prefs = vpref.load_voice_prefs(app=self)
+        except Exception:
+            pass
+        try:
+            from kivy.clock import Clock
+            Clock.schedule_interval(self._voice_speak_tick, 0.25)
+        except Exception:
+            pass
+        try:
+            from kivy.core.window import Window
+            Window.bind(on_key_down=self._voice_key_down,
+                        on_key_up=self._voice_key_up)
+        except Exception:
+            pass
+
+    def _voice_key_down(self, window, key, scancode, codepoint, modifier):
+        # bound ptt key: down edge raises the hold (no consume; other
+        # listeners may share the event)
+        try:
+            import client_voice_prefs as vpref
+            prefs = getattr(self, "_voice_prefs", None) or {}
+            if not vpref.ptt_key_matches(prefs, key, scancode):
+                return
+            engine = getattr(self, "_voice_engine", None)
+            fn = getattr(engine, "set_ptt", None) if engine else None
+            if fn is not None:
+                fn(True)
+        except Exception:
+            pass
+
+    def _voice_key_up(self, window, key, scancode):
+        try:
+            import client_voice_prefs as vpref
+            prefs = getattr(self, "_voice_prefs", None) or {}
+            if not vpref.ptt_key_matches(prefs, key, scancode):
+                return
+            engine = getattr(self, "_voice_engine", None)
+            fn = getattr(engine, "set_ptt", None) if engine else None
+            if fn is not None:
+                fn(False)
+        except Exception:
+            pass
 
     # ---- push path ------------------------------------------------------
 
@@ -70,10 +118,36 @@ class VoicePanelMixin:
             self.root.get_screen("main")
         except Exception:
             return
-        for cid, w in list(rows.items()):
-            w.render(self._voice_rooms.get(cid),
-                     joined=cid == self._voice_room_cid,
-                     muted=self._voice_muted)
+        engine = getattr(self, "_voice_engine", None)
+        room_cid = getattr(self, "_voice_room_cid", None)
+        speaking = []
+        mine = False
+        mode = None
+        if engine is not None and room_cid is not None:
+            # bench fakes may predate the tx-shaping getters
+            fn_speak = getattr(engine, "speaking_peers", None)
+            speaking = fn_speak() if fn_speak else []
+            fn_self = getattr(engine, "self_speaking", None)
+            mine = fn_self() if fn_self else False
+            mode = getattr(engine, "voice_mode", None)
+        my_viewer = getattr(self, "my_user_hash", "") or ""
+        for cid_, w in list(rows.items()):
+            w.render(self._voice_rooms.get(cid_),
+                     joined=cid_ == self._voice_room_cid,
+                     muted=self._voice_muted,
+                     speaking=speaking if cid_ == room_cid else None,
+                     tx_mode=mode if cid_ == room_cid else None,
+                     self_speaking=mine,
+                     my_viewer=my_viewer)
+
+    def _voice_speak_tick(self, dt):
+        """Live speaking refresh while joined (greens move at 4 Hz)."""
+        if getattr(self, "_voice_room_cid", None) is None:
+            return
+        try:
+            self._voice_rail_refresh()
+        except Exception:
+            pass
 
     def _voice_row_for(self, name, cid):
         """The sidebar's voice row widget for a channel; built lazily."""
@@ -82,10 +156,30 @@ class VoicePanelMixin:
         from client_widgets import VoiceRow
         row = VoiceRow(channel_name=name)
         row.bind_action(self._voice_tap_join, self._voice_tap_leave,
-                        self._voice_tap_toggle_mute)
+                        self._voice_tap_toggle_mute,
+                        on_mode=self._voice_tap_mode,
+                        on_ptt=self._voice_tap_ptt)
         self._voice_rows[cid] = row
         self._voice_rail_refresh(cid)
         return row
+
+    def _voice_tap_mode(self, name, mode):
+        engine = getattr(self, "_voice_engine", None)
+        fn = getattr(engine, "set_voice_mode", None) if engine else None
+        if fn is None:
+            return
+        got = fn(mode)
+        self._set_status("voice tx: %s" %
+                         ("push-to-talk" if got == "ptt" else
+                          "voice-activated" if got == "vad" else "open mic"))
+        self._voice_rail_refresh()
+
+    def _voice_tap_ptt(self, name, down):
+        engine = getattr(self, "_voice_engine", None)
+        fn = getattr(engine, "set_ptt", None) if engine else None
+        if fn is None:
+            return
+        fn(down)
 
     # ---- actions --------------------------------------------------------
 
@@ -143,6 +237,18 @@ class VoicePanelMixin:
                     return self.api.voice_publish(cid, body)
 
             engine = VoiceEngine(viewer=user_hash, hub=HubGate(self.guild_api))
+            # persisted tx prefs (user settings page) apply to the fresh
+            # engine so a saved mode/threshold survives restarts
+            prefs = getattr(self, "_voice_prefs", None) or {}
+            mode_fn = getattr(engine, "set_voice_mode", None)
+            if mode_fn is not None and prefs.get("mode") in (
+                    "always", "ptt", "vad"):
+                mode_fn(prefs["mode"])
+            if prefs.get("vad_rms"):
+                try:
+                    engine.vad_rms = int(prefs["vad_rms"])
+                except (TypeError, ValueError):
+                    pass
             my_ident = RNS.Identity.from_file(self._identity_file())
             lane = core.VoiceLane(my_ident)
             my_dest = lane.open_listener(engine)

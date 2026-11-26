@@ -440,6 +440,15 @@
                 size_hint_x: None
                 width: dp(230)
                 pos_hint: {'center_x': 0.5}
+                on_press: app.open_config()
+                MDButtonText:
+                    text: 'Settings'
+                    text_color: app.theme_colors['text']
+            FancyMDButton:
+                variant: 'outlined'
+                size_hint_x: None
+                width: dp(230)
+                pos_hint: {'center_x': 0.5}
                 on_press: app.import_contact_card()
                 MDButtonText:
                     text: 'Import card from clipboard'
@@ -1434,75 +1443,104 @@
                 pos: self.pos
                 size: self.size
         Label:
-            text: 'Appearance'
+            text: 'Profile config'
             font_size: sp(24)
             bold: True
             color: app.theme_colors['text']
             size_hint_y: None
             height: dp(44)
+        BoxLayout:
+            size_hint_y: None
+            height: dp(56)
+            spacing: dp(8)
+            padding: dp(6)
+            FancyMDButton:
+                id: tab_general
+                size_hint_y: None
+                height: dp(44)
+                variant: 'primary'
+                on_press: root.switch_tab('general')
+                MDButtonText:
+                    text: 'Appearance'
+                    text_color: app.theme_colors['btn_text']
+            FancyMDButton:
+                id: tab_voice
+                size_hint_y: None
+                height: dp(44)
+                variant: 'outlined'
+                on_press: root.switch_tab('voice')
+                MDButtonText:
+                    text: 'Voice'
+                    text_color: app.theme_colors['text']
         ScrollView:
             do_scroll_x: False
             BoxLayout:
+                id: config_host
                 orientation: 'vertical'
                 size_hint_y: None
                 height: self.minimum_height
-                padding: dp(12)
-                spacing: dp(8)
-                Label:
-                    text: 'Theme presets'
-                    font_size: sp(16)
-                    bold: True
-                    color: app.theme_colors['text_muted']
-                    size_hint_y: None
-                    height: dp(28)
-                GridLayout:
-                    cols: 3
-                    size_hint_y: None
-                    height: dp(96)
-                    spacing: dp(6)
-                    FancyMDButton:
-                        variant: 'outlined'
-                        on_press: root.choose_preset('Midnight')
-                        MDButtonText:
-                            text: 'Midnight'
-                    FancyMDButton:
-                        variant: 'outlined'
-                        on_press: root.choose_preset('Ember')
-                        MDButtonText:
-                            text: 'Ember'
-                    FancyMDButton:
-                        variant: 'outlined'
-                        on_press: root.choose_preset('Mint')
-                        MDButtonText:
-                            text: 'Mint'
-                    FancyMDButton:
-                        variant: 'outlined'
-                        on_press: root.choose_preset('Mono')
-                        MDButtonText:
-                            text: 'Mono'
-                    FancyMDButton:
-                        variant: 'outlined'
-                        on_press: root.choose_preset('Daylight')
-                        MDButtonText:
-                            text: 'Daylight'
-                Label:
-                    text: 'Fine tune colors (hex #RRGGBB)'
-                    font_size: sp(16)
-                    bold: True
-                    color: app.theme_colors['text_muted']
-                    size_hint_y: None
-                    height: dp(28)
-                # One row per THEME_KEYS entry, generated in Python by
-                # ConfigScreen._ensure_color_rows. The previous 14
-                # hand-written KV blocks covered only 14 of the 17 keys --
-                # btn_text, border and border_subtle had no field and were
-                # silently skipped on save.
-                GridLayout:
-                    id: theme_rows
-                    cols: 1
+                BoxLayout:
+                    id: config_pages
+                    orientation: 'vertical'
                     size_hint_y: None
                     height: self.minimum_height
+                    padding: dp(12)
                     spacing: dp(8)
+                    Label:
+                        text: 'Theme presets'
+                        font_size: sp(16)
+                        bold: True
+                        color: app.theme_colors['text_muted']
+                        size_hint_y: None
+                        height: dp(28)
+                    GridLayout:
+                        cols: 3
+                        size_hint_y: None
+                        height: dp(96)
+                        spacing: dp(6)
+                        FancyMDButton:
+                            variant: 'outlined'
+                            on_press: root.choose_preset('Midnight')
+                            MDButtonText:
+                                text: 'Midnight'
+                        FancyMDButton:
+                            variant: 'outlined'
+                            on_press: root.choose_preset('Ember')
+                            MDButtonText:
+                                text: 'Ember'
+                        FancyMDButton:
+                            variant: 'outlined'
+                            on_press: root.choose_preset('Mint')
+                            MDButtonText:
+                                text: 'Mint'
+                        FancyMDButton:
+                            variant: 'outlined'
+                            on_press: root.choose_preset('Mono')
+                            MDButtonText:
+                                text: 'Mono'
+                        FancyMDButton:
+                            variant: 'outlined'
+                            on_press: root.choose_preset('Daylight')
+                            MDButtonText:
+                                text: 'Daylight'
+                    Label:
+                        text: 'Fine tune colors (hex #RRGGBB)'
+                        font_size: sp(16)
+                        bold: True
+                        color: app.theme_colors['text_muted']
+                        size_hint_y: None
+                        height: dp(28)
+                    # One row per THEME_KEYS entry, generated in Python by
+                    # ConfigScreen._ensure_color_rows. The previous 14
+                    # hand-written KV blocks covered only 14 of the 17 keys --
+                    # btn_text, border and border_subtle had no field and were
+                    # silently skipped on save.
+                    GridLayout:
+                        id: theme_rows
+                        cols: 1
+                        size_hint_y: None
+                        height: self.minimum_height
+                        spacing: dp(8)
         Label:
             id: config_status
             text: ''
@@ -1510,6 +1548,7 @@
             size_hint_y: None
             height: dp(26)
         BoxLayout:
+            id: config_footer
             size_hint_y: None
             height: dp(56)
             padding: dp(12)

@@ -19,6 +19,7 @@ run the whole loop with a fake and the client with real RNS.
 import os
 import threading
 import time
+import struct
 
 import RNS
 
@@ -36,6 +37,25 @@ except Exception:  # pragma: no cover - keeps lint import paths sane
 PACKET_FRAMES = 5          # 5 x 20ms = 100ms per outbound packet
 PACKET_INTERVAL_S = 0.1
 JITTER_MAX_PACKETS = 6     # per-speaker holdback (~600ms ceiling)
+
+# tay 2026-11-25: transmit shaping. "always" = open mic while
+# unmuted; "ptt" = transmit only while a hold control is down;
+# "vad" (voc) = transmit when the mic frame's RMS crosses the
+# threshold, bridged by a 200ms hangover so speech doesn't chop.
+VOICE_MODES = ("always", "ptt", "vad")
+VAD_RMS_DEFAULT = 800      # ~ -32 dBFS on 16-bit mono
+VAD_HANGOVER_FRAMES = 10
+SPEAK_WINDOW_S = 0.35      # packet age within this = visibly speaking
+
+
+def frame_rms_s16(pcm):
+    """Root mean square of a little-endian 16-bit mono frame, or 0."""
+    n = len(pcm) // 2
+    if not n:
+        return 0
+    samples = struct.unpack("<%dh" % n, pcm[:n * 2])
+    acc = sum(s * s for s in samples)
+    return int((acc / n) ** 0.5)
 
 
 class FakeLink(object):
@@ -107,6 +127,13 @@ class VoiceEngine(object):
         self.plc_frames = 0
         self.relayed_frames = 0   # hub forwards: never moves (receipt)
         self.last_played_at = 0.0
+        # tx shaping (tay 2026-11-25: push-to-talk / always-on / voc)
+        self.voice_mode = "always"
+        self.vad_rms = VAD_RMS_DEFAULT
+        self._ptt_down = False
+        self._vad_hang = 0
+        self._tx_live = False
+        self._last_rx = {}        # speaker dest hex -> last packet time
 
     # ---- wiring -------------------------------------------------------
 
@@ -167,6 +194,29 @@ class VoiceEngine(object):
         self.muted = muted
         return muted
 
+    # ---- tx shaping (tay 2026-11-25) ------------------------------------
+
+    def set_voice_mode(self, mode):
+        """always | ptt | vad (voc). Anything else keeps the current."""
+        if mode in VOICE_MODES:
+            self.voice_mode = mode
+        self._vad_hang = 0
+        return self.voice_mode
+
+    def set_ptt(self, down):
+        """PTT hold state down/up (one control may call this per tick)."""
+        self._ptt_down = bool(down)
+        return self._ptt_down
+
+    def speaking_peers(self):
+        """Dest hexes with a voice packet inside SPEAK_WINDOW_S."""
+        now0 = time.time()
+        last = dict(self._last_rx)
+        return [d for d, t in last.items() if now0 - t <= SPEAK_WINDOW_S]
+
+    def self_speaking(self):
+        return bool(self._tx_live) and not self.muted
+
     # ---- roster (push path) --------------------------------------------
 
     def on_roster(self, cid, members):
@@ -212,13 +262,28 @@ class VoiceEngine(object):
         while not self._pacing.wait(PACKET_INTERVAL_S):
             t_tick = time.time()
             if self.room_cid is None or self.muted or self._source is None:
+                self._vad_hang = 0
+                self._tx_live = False
+                continue
+            if self.voice_mode == "ptt" and not self._ptt_down:
+                self._tx_live = False
                 continue
             frames = []
             for _ in range(PACKET_FRAMES):
                 pcm = self._source()
-                if pcm:
-                    frames.append(self.codec.encode(pcm))
-                    self.frames_out += 1
+                if not pcm:
+                    continue
+                if self.voice_mode == "vad":
+                    loud = frame_rms_s16(pcm) >= self.vad_rms
+                    if loud:
+                        self._vad_hang = VAD_HANGOVER_FRAMES
+                    elif self._vad_hang <= 0:
+                        continue
+                    else:
+                        self._vad_hang -= 1
+                frames.append(self.codec.encode(pcm))
+                self.frames_out += 1
+            self._tx_live = bool(frames)
             if not frames:
                 continue
             body = vc.encode_packet(self.codec, frames)
@@ -270,6 +335,7 @@ class VoiceEngine(object):
 
     def packet_received(self, speaker_dest_hex, body):
         """Demux: unpack, hold in the per-speaker jitter, feed the pump."""
+        self._last_rx[speaker_dest_hex] = time.time()
         if len(body) < 2:
             return
         seq = int.from_bytes(body[:2], "big")

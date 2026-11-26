@@ -171,6 +171,12 @@ class StubApp(object):
         self._attachments_dir = lambda: self._attach_dir
         self._save_attachment_blob = functools.partial(
             kivy_client.sHadesClientApp._save_attachment_blob, self)
+        self._cached_attachment_blob = functools.partial(
+            kivy_client.sHadesClientApp._cached_attachment_blob, self)
+        self._atts_link_ok = functools.partial(
+            kivy_client.sHadesClientApp._atts_link_ok, self)
+        self._att_fetch_attempts_pop = functools.partial(
+            kivy_client.sHadesClientApp._att_fetch_attempts_pop, self)
         self._add_attachment_embed = functools.partial(
             kivy_client.sHadesClientApp._add_attachment_embed, self)
         self._fetch_attachment = functools.partial(

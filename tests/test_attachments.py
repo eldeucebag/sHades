@@ -19,6 +19,7 @@ import sys
 import time
 import functools
 import tempfile
+
 import base64
 
 # Use the real SDL window on DISPLAY (including CI's Xvfb).
@@ -71,6 +72,7 @@ class StubGuild:
         self.posted = []
         self.uploads = []
         self.att_calls = []
+        self.fetch_calls = []
 
     def post(self, channel, content, attachments=None):
         self.posted.append((channel, content, attachments))
@@ -107,6 +109,7 @@ class StubGuild:
         return {"ok": 0}
 
     def fetch_file(self, path):
+        self.fetch_calls.append(path)
         return self.files.get(path)
 
 
@@ -166,6 +169,13 @@ class StubApp:
             kivy_client.sHadesClientApp._loading_placeholder_text)
         self._remove_placeholder = functools.partial(
             kivy_client.sHadesClientApp._remove_placeholder, self)
+        # resume-race fix (device log 15): cache-first + retry helpers
+        self._cached_attachment_blob = functools.partial(
+            kivy_client.sHadesClientApp._cached_attachment_blob, self)
+        self._atts_link_ok = functools.partial(
+            kivy_client.sHadesClientApp._atts_link_ok, self)
+        self._att_fetch_attempts_pop = functools.partial(
+            kivy_client.sHadesClientApp._att_fetch_attempts_pop, self)
         # _render_message() ends by calling this to draw the reaction summary
         # line; without it the stub raises AttributeError on every render.
         self._set_row_reactions = functools.partial(
@@ -187,6 +197,7 @@ def main():
     except Exception as e:
         print("SKIP  kivy_client import failed: %s" % e)
         return 0
+    from client_util import ATT_SERVER
     if not kc.KIVY:
         print("SKIP  Kivy not available")
         return 0
@@ -349,6 +360,117 @@ def main():
               app._loading_placeholder_text("cat.jpg"),
               app._loading_placeholder_text("notes.pdf"),
               app._loading_placeholder_text("")))
+
+
+    # --- 7. resume-race: cache-first + bounded retry (device log 15) ------
+    # The resume replay can fire before the guild link is usable; the
+    # empty fetch used to be terminal ("attachment fetch failed" above
+    # the QR card). Every successful fetch already saves its blob on
+    # disk, so restores consult that cache first, and a link-not-ready
+    # miss retries instead of dying.
+    img = bytes(range(256)) * 20  # 5120 bytes
+    grid7 = GridLayout(cols=1)
+    app7 = StubApp(kc, grid7, files={})  # empty hub: nothing fetchable
+    p = app7._save_attachment_blob(img, "__bbs1 (2).jpg")
+    check("blob of a previous fetch sits in the cache dir",
+          bool(p) and os.path.getsize(p) == len(img), repr(p))
+    att7 = {"name": "__bbs1 (2).jpg", "mime": "image/jpeg",
+            "size": len(img), "kind": ATT_SERVER,
+            "path": "/file/attachments/da035e6413534554b308c3bf.jpg"}
+    hit = app7._cached_attachment_blob(att7)
+    check("cache-first finds the previous blob by name and size",
+          hit == img, "%s" % (len(hit) if hit else None))
+    img2 = img[:-1] + bytes([255 - img[-1]])
+    p2 = app7._save_attachment_blob(img2, "__bbs1 (2).jpg")
+    check("ambiguous cache (two same-name same-size) refuses",
+          app7._cached_attachment_blob(att7) is None)
+    os.remove(p2)
+    check("size mismatch refuses the cache",
+          app7._cached_attachment_blob(
+              dict(att7, size=len(img) + 1)) is None)
+    check("single candidate without advertised size hits",
+          app7._cached_attachment_blob(dict(att7, size=0)) == img)
+    m7 = {"msg_id": "m-7", "author_hash": "a1", "username": "tester",
+          "content": "card pic", "ts": 0, "attachments": [att7]}
+    kc.sHadesClientApp._render_message(app7, grid7, m7)
+    row7 = grid7.children[0]
+    dl7 = time.time() + 3
+    while time.time() < dl7:
+        Clock.tick()
+        if len(row7.ids.embed_container.children) == 1:
+            break
+        time.sleep(0.02)
+    check("restore renders from cache with no fetch attempt",
+          len(row7.ids.embed_container.children) == 1
+          and app7.guild_api.att_calls == []
+          and app7.guild_api.fetch_calls == [],
+          "embeds=%d fetches=%d+%d" % (
+              len(row7.ids.embed_container.children),
+              len(app7.guild_api.fetch_calls),
+              len(app7.guild_api.att_calls)))
+    check("cache hit releases the retry budget",
+          not getattr(app7, "_att_fetch_attempts", None))
+    os.remove(p)  # cache empty again: the retry lanes exercise the network
+    grid8 = GridLayout(cols=1)
+    app8 = StubApp(kc, grid8, files={})
+    att8 = {"name": "fresh.png", "mime": "image/png", "size": 42,
+            "kind": ATT_SERVER, "path": "/file/attachments/fresh.png"}
+    m8 = {"msg_id": "m-8", "author_hash": "a1", "username": "tester",
+          "content": "pre-link upload", "ts": 0, "attachments": [att8]}
+    kc.sHadesClientApp._render_message(app8, grid8, m8)
+    row8 = grid8.children[0]
+    dl8 = time.time() + 3
+    retried = False
+    while time.time() < dl8:
+        Clock.tick()
+        if any("retry" in s for s in app8.status):
+            retried = True
+            break
+        time.sleep(0.02)
+    check("pre-link empty fetch retries instead of terminal error",
+          retried and not any("failed" in s for s in app8.status),
+          "status=%r" % app8.status[-3:])
+    # the hub becomes fetchable; the retry body (what the fired event
+    # runs) re-fetches and lands the real blob
+    app8.guild_api.files["/file/attachments/fresh.png"] = b"P" * 42
+    app8._fetch_attachment(row8, "m-8", att8)
+    dl8 = time.time() + 3
+    while time.time() < dl8:
+        Clock.tick()
+        if len(row8.ids.embed_container.children) == 1:
+            break
+        time.sleep(0.02)
+    check("retry renders the embed once the hub is fetchable",
+          len(row8.ids.embed_container.children) == 1,
+          "%d embeds in row" % len(row8.ids.embed_container.children))
+    check("resolved retry releases its budget",
+          not getattr(app8, "_att_fetch_attempts", None),
+          repr(getattr(app8, "_att_fetch_attempts", None)))
+    # the second empty attempt IS terminal: the named error, capped at 2
+    grid9 = GridLayout(cols=1)
+    app9 = StubApp(kc, grid9, files={})
+    att9 = {"name": "dead.png", "mime": "image/png", "size": 7,
+            "kind": ATT_SERVER, "path": "/file/attachments/dead.png"}
+    m9 = {"msg_id": "m-9", "author_hash": "a1", "username": "tester",
+          "content": "unreachable", "ts": 0, "attachments": [att9]}
+    kc.sHadesClientApp._render_message(app9, grid9, m9)
+    dl9 = time.time() + 3
+    while time.time() < dl9:
+        Clock.tick()
+        if any("retry" in s for s in app9.status):
+            break
+        time.sleep(0.02)
+    # budget already at 1 (the render attempt); the fired retry hits the cap
+    app9._fetch_attachment(grid9.children[0], "m-9", att9)
+    dl9 = time.time() + 3
+    while time.time() < dl9:
+        Clock.tick()
+        if any("attachment fetch failed: dead.png" in s for s in app9.status):
+            break
+        time.sleep(0.02)
+    check("second empty fetch is terminal with the named error",
+          any("attachment fetch failed: dead.png" in s for s in app9.status),
+          repr(app9.status[-2:]))
 
     print()
     print("%d passed, %d failed" % (len(PASS), len(FAIL)))
